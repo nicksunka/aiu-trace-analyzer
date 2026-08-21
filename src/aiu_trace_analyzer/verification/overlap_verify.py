@@ -14,10 +14,105 @@ This module reuses the overlap detection of the regular processing pipeline
   * the streams are identified per input dialect instead of by pid+tid
 """
 
+import copy
+
 from aiu_trace_analyzer.types import TraceEvent, TraceWarning
 from aiu_trace_analyzer.pipeline.context import AbstractContext, AbstractVerificationContext
+from aiu_trace_analyzer.pipeline.barrier import TwoPhaseWithBarrierContext
 from aiu_trace_analyzer.pipeline.overlap import OverlapDetectionContext
 from aiu_trace_analyzer.pipeline.tools import PipelineContextTool
+
+
+def _is_memory_event(event: TraceEvent) -> bool:
+    """Return whether an accelerator event represents a memory operation."""
+    dialect = PipelineContextTool.get_dialect_of_event(event)
+    if dialect is None:
+        return False
+
+    if dialect.get("NAME") == "TORCH":
+        return event.get("cat") in {"gpu_memcpy", "gpu_memset"}
+
+    return (
+        PipelineContextTool.is_category(event, "acc_datatransfer_HtoD")
+        or PipelineContextTool.is_category(event, "acc_datatransfer_DtoH")
+    )
+
+
+
+def _is_memory_superevent(event: TraceEvent) -> bool:
+    return event.get("args", {}).get("_memory_superevent") is True
+
+
+class MemoryOverlapContext(TwoPhaseWithBarrierContext):
+    """Collect occupied memory intervals for each accelerator stream."""
+
+    _DEFAULT_STREAM = 0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.memory_intervals = {}
+
+    def _stream_id(self, event: TraceEvent):
+        dialect = PipelineContextTool.get_dialect_of_event(event)
+        assert dialect is not None, "Cannot determine input dialect for memory event"
+
+        if dialect.get("NAME") == "TORCH":
+            stream = event["args"].get("stream", self._DEFAULT_STREAM)
+            return event["pid"], stream
+
+        return (event["pid"],)
+
+    def add_memory_event(self, event: TraceEvent) -> None:
+        stream_id = self._stream_id(event)
+        start = event["ts"]
+        end = round(event["ts"] + event["dur"], 4)
+
+        intervals = self.memory_intervals.setdefault(stream_id, [])
+
+        if intervals and start < intervals[-1]["end"]:
+            intervals[-1]["end"] = max(intervals[-1]["end"], end)
+            return
+
+        intervals.append({
+            "start": start,
+            "end": end,
+            "event": event,
+        })
+
+    def make_memory_superevents(self) -> list[TraceEvent]:
+        superevents = []
+
+        for intervals in self.memory_intervals.values():
+            for interval in intervals:
+                event = copy.deepcopy(interval["event"])
+
+                event["name"] = "Memory operations"
+                event["cat"] = "gpu_memory"
+                event["ts"] = interval["start"]
+                event["dur"] = interval["end"] - interval["start"]
+                event["args"]["_memory_superevent"] = True
+
+                superevents.append(event)
+
+        return superevents
+
+    def drain(self) -> list[TraceEvent]:
+        if self.collection_phase():
+            TwoPhaseWithBarrierContext.drain(self)
+            return self.make_memory_superevents()
+
+        return super().drain()
+
+
+
+def memory_overlap_collect(event: TraceEvent, context: AbstractContext) -> list[TraceEvent]:
+    assert isinstance(context, MemoryOverlapContext)
+
+    if event["ph"] != "X" or not _is_memory_event(event):
+        return [event]
+
+    context.add_memory_event(event)
+    return [event]
 
 
 class OverlapVerificationContext(OverlapDetectionContext, AbstractVerificationContext):
@@ -88,8 +183,11 @@ class OverlapVerificationContext(OverlapDetectionContext, AbstractVerificationCo
 def verify_kernel_overlap(event: TraceEvent, context: AbstractContext) -> list[TraceEvent]:
     assert isinstance(context, OverlapVerificationContext)
 
-    # only compute events are checked; anything else just passes through
-    if event["ph"] not in "X" or not PipelineContextTool.is_acc_event(event):
+    # only compute kernels and temporary memory superevents are checked
+    if event["ph"] not in "X":
+        return [event]
+
+    if not PipelineContextTool.is_acc_kernel(event) and not _is_memory_superevent(event):
         return [event]
 
     # the default is only required to determine the queue/stream of this event: drop it again to

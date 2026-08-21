@@ -1,9 +1,10 @@
 {
     "stages": [
         {"sort_events": true},
-        {"verify_kernel_overlap": true},
+        {"memory_overlap_collect": true},
         {"kernel_parent_collect": true},
         {"pipeline_barrier": true},
+        {"verify_kernel_overlap": true},
         {"kernel_parent_verify": true},
         {"verification_result_filter": true}
     ]

@@ -767,6 +767,7 @@ class Acelyzer:
 
         # strict: accelerator events have no call/return relationship, so even a fully embedded
         # event is a data problem and not a legitimate nesting
+        memory_overlap_ctx = verify_pipe.MemoryOverlapContext()
         overlap_verification_ctx = verify_pipe.OverlapVerificationContext(strict=True)
         kernel_parent_ctx = verify_pipe.KernelParentVerificationContext()
 
@@ -775,9 +776,10 @@ class Acelyzer:
             event_types=None, sortkey=self._default_sort_ts_and_rev_dur, global_sort=True))
 
         # anything that requires a sorted event stream below this point
-        process.register_stage(callback=verify_pipe.verify_kernel_overlap, context=overlap_verification_ctx)
+        process.register_stage(callback=verify_pipe.memory_overlap_collect, context=memory_overlap_ctx)
         process.register_stage(callback=verify_pipe.kernel_parent_collect, context=kernel_parent_ctx)
         process.register_stage(callback=event_pipe.pipeline_barrier, context=event_pipe._main_barrier_context)
+        process.register_stage(callback=verify_pipe.verify_kernel_overlap, context=overlap_verification_ctx)
         process.register_stage(callback=verify_pipe.kernel_parent_verify, context=kernel_parent_ctx)
 
         # drop all regular events and only keep report-data after this stage
