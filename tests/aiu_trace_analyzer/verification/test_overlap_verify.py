@@ -9,6 +9,8 @@ from aiu_trace_analyzer.verification.overlap_verify import (
     MemoryOverlapContext,
     OverlapVerificationContext,
     _is_memory_event,
+    _is_memory_superevent,
+    memory_overlap_collect,
     verify_kernel_overlap,
 )
 
@@ -65,44 +67,60 @@ def test_cross_stream_kernel_overlap_is_allowed():
     assert _run(events) == 0
 
 
-def test_original_memory_events_are_not_checked_directly():
-    events = [
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1),
-        _event("Memcpy (DtoH)", "gpu_memcpy", 110.0, 20.0, 1),
-    ]
+def _run_memory_stage(events):
+    context = MemoryOverlapContext()
+    output = []
 
-    assert _run(events) == 0
+    for event in events:
+        output.extend(memory_overlap_collect(event, context))
+
+    output.extend(context.drain())
+    return output
+
+
+def _memory_superevents(events):
+    return [event for event in events if _is_memory_superevent(event)]
 
 
 def test_same_stream_kernel_memory_superevent_overlap_is_detected():
-    memory_context = MemoryOverlapContext()
-
-    memory_context.add_memory_event(
-        _event("Memcpy (DtoH)", "gpu_memcpy", 110.0, 20.0, 1)
+    memory = _event(
+        "Memcpy (DtoH)",
+        "gpu_memcpy",
+        110.0,
+        20.0,
+        1,
     )
 
-    memory_superevents = memory_context.make_memory_superevents()
+    output = _run_memory_stage([memory])
+    superevent = _memory_superevents(output)[0]
 
     events = [
         _event("kernel_1", "kernel", 100.0, 20.0, 1),
-        memory_superevents[0],
+        superevent,
     ]
 
     assert _run(events) == 1
 
 
+def test_cross_stream_kernel_memory_superevent_overlap_is_allowed():
+    memory = _event(
+        "Memcpy (DtoH)",
+        "gpu_memcpy",
+        110.0,
+        20.0,
+        2,
+    )
 
+    output = _run_memory_stage([memory])
+    superevent = _memory_superevents(output)[0]
 
-def _interval_bounds(context, stream_id):
-    bounds = []
+    events = [
+        _event("kernel_1", "kernel", 100.0, 20.0, 1),
+        superevent,
+    ]
 
-    for interval in context.memory_intervals[stream_id]:
-        bounds.append({
-            "start": interval["start"],
-            "end": interval["end"],
-        })
+    assert _run(events) == 0
 
-    return bounds
 
 def test_memory_event_classification():
     memcpy = _event("Memcpy (DtoH)", "gpu_memcpy", 100.0, 10.0, 1)
@@ -115,132 +133,93 @@ def test_memory_event_classification():
 
 
 def test_memory_context_merges_overlapping_events_on_same_stream():
-    context = MemoryOverlapContext()
-
-    context.add_memory_event(
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1)
-    )
-    context.add_memory_event(
-        _event("Memset (Device)", "gpu_memset", 110.0, 20.0, 1)
-    )
-
-    assert _interval_bounds(context, (0, 1)) == [
-        {"start": 100.0, "end": 130.0}
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1),
+        _event("Memset (Device)", "gpu_memset", 110.0, 20.0, 1),
     ]
 
+    output = _run_memory_stage(events)
+    superevents = _memory_superevents(output)
 
-def test_memory_context_keeps_separate_intervals_on_same_stream():
-    context = MemoryOverlapContext()
-
-    context.add_memory_event(
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 10.0, 1)
-    )
-    context.add_memory_event(
-        _event("Memcpy (DtoH)", "gpu_memcpy", 120.0, 10.0, 1)
-    )
-
-    assert _interval_bounds(context, (0, 1)) == [
-        {"start": 100.0, "end": 110.0},
-        {"start": 120.0, "end": 130.0},
-    ]
-
-
-def test_memory_context_keeps_streams_separate():
-    context = MemoryOverlapContext()
-
-    context.add_memory_event(
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1)
-    )
-    context.add_memory_event(
-        _event("Memcpy (DtoH)", "gpu_memcpy", 110.0, 20.0, 2)
-    )
-
-    assert _interval_bounds(context, (0, 1)) == [
-        {"start": 100.0, "end": 120.0}
-    ]
-    assert _interval_bounds(context, (0, 2)) == [
-        {"start": 110.0, "end": 130.0}
-    ]
-
-
-def test_memory_context_uses_default_stream_when_missing():
-    context = MemoryOverlapContext()
-
-    event = _event("Memcpy (DtoH)", "gpu_memcpy", 100.0, 20.0, 1)
-    event["args"].pop("stream")
-
-    context.add_memory_event(event)
-
-    assert _interval_bounds(context, (0, 0)) == [
-        {"start": 100.0, "end": 120.0}
-    ]
-
+    assert len(superevents) == 1
+    assert superevents[0]["ts"] == 100.0
+    assert superevents[0]["dur"] == 30.0
+    assert superevents[0]["args"]["stream"] == 1
 
 
 def test_memory_context_keeps_back_to_back_events_separate():
-    context = MemoryOverlapContext()
-
-    context.add_memory_event(
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1)
-    )
-    context.add_memory_event(
-        _event("Memcpy (DtoH)", "gpu_memcpy", 120.0, 20.0, 1)
-    )
-
-    assert _interval_bounds(context, (0, 1)) == [
-        {"start": 100.0, "end": 120.0},
-        {"start": 120.0, "end": 140.0},
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1),
+        _event("Memcpy (DtoH)", "gpu_memcpy", 120.0, 20.0, 1),
     ]
 
-
-
-def test_memory_context_creates_one_superevent_for_merged_interval():
-    context = MemoryOverlapContext()
-
-    context.add_memory_event(
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1)
-    )
-    context.add_memory_event(
-        _event("Memset (Device)", "gpu_memset", 110.0, 20.0, 1)
-    )
-
-    superevents = context.make_memory_superevents()
-
-    assert len(superevents) == 1
-
-    event = superevents[0]
-    assert event["name"] == "Memory operations"
-    assert event["cat"] == "gpu_memory"
-    assert event["ts"] == 100.0
-    assert event["dur"] == 30.0
-    assert event["args"]["stream"] == 1
-    assert event["args"]["_memory_superevent"] is True
-
-
-def test_memory_context_creates_superevent_for_each_interval():
-    context = MemoryOverlapContext()
-
-    context.add_memory_event(
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 10.0, 1)
-    )
-    context.add_memory_event(
-        _event("Memcpy (DtoH)", "gpu_memcpy", 120.0, 10.0, 1)
-    )
-
-    superevents = context.make_memory_superevents()
+    output = _run_memory_stage(events)
+    superevents = _memory_superevents(output)
 
     assert len(superevents) == 2
-
     assert superevents[0]["ts"] == 100.0
-    assert superevents[0]["dur"] == 10.0
-
+    assert superevents[0]["dur"] == 20.0
     assert superevents[1]["ts"] == 120.0
-    assert superevents[1]["dur"] == 10.0
+    assert superevents[1]["dur"] == 20.0
+
+
+def test_memory_context_keeps_separate_groups_on_same_stream():
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 10.0, 1),
+        _event("Memcpy (DtoH)", "gpu_memcpy", 120.0, 10.0, 1),
+    ]
+
+    output = _run_memory_stage(events)
+    superevents = _memory_superevents(output)
+
+    assert len(superevents) == 2
+    assert superevents[0]["ts"] == 100.0
+    assert superevents[1]["ts"] == 120.0
+
+
+def test_memory_context_keeps_streams_separate():
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1),
+        _event("Memcpy (DtoH)", "gpu_memcpy", 110.0, 20.0, 2),
+    ]
+
+    output = _run_memory_stage(events)
+    superevents = _memory_superevents(output)
+
+    assert len(superevents) == 2
+    assert superevents[0]["args"]["stream"] == 1
+    assert superevents[1]["args"]["stream"] == 2
+
+
+def test_memory_context_uses_default_stream_when_missing():
+    first = _event(
+        "Memcpy (HtoD)",
+        "gpu_memcpy",
+        100.0,
+        20.0,
+        1,
+    )
+    second = _event(
+        "Memcpy (DtoH)",
+        "gpu_memcpy",
+        110.0,
+        20.0,
+        1,
+    )
+
+    first["args"].pop("stream")
+    second["args"].pop("stream")
+
+    output = _run_memory_stage([first, second])
+    superevents = _memory_superevents(output)
+
+    assert len(superevents) == 1
+    assert superevents[0]["ts"] == 100.0
+    assert superevents[0]["dur"] == 30.0
+    assert "stream" not in superevents[0]["args"]
 
 
 def test_memory_superevent_does_not_modify_original_event():
-    context = MemoryOverlapContext()
-
     original = _event(
         "Memcpy (HtoD)",
         "gpu_memcpy",
@@ -249,9 +228,10 @@ def test_memory_superevent_does_not_modify_original_event():
         1,
     )
 
-    context.add_memory_event(original)
-    context.make_memory_superevents()
+    output = _run_memory_stage([original])
+    superevent = _memory_superevents(output)[0]
 
+    assert superevent is not original
     assert original["name"] == "Memcpy (HtoD)"
     assert original["cat"] == "gpu_memcpy"
     assert original["ts"] == 100.0
@@ -259,27 +239,235 @@ def test_memory_superevent_does_not_modify_original_event():
     assert "_memory_superevent" not in original["args"]
 
 
-
-def test_memory_context_starts_in_collection_phase():
+def test_memory_context_holds_events_while_group_is_open():
     context = MemoryOverlapContext()
 
-    assert context.collection_phase()
+    memory = _event(
+        "Memcpy (HtoD)",
+        "gpu_memcpy",
+        100.0,
+        50.0,
+        1,
+    )
+    kernel = _event(
+        "kernel_1",
+        "kernel",
+        110.0,
+        10.0,
+        1,
+    )
+
+    assert memory_overlap_collect(memory, context) == []
+    assert memory_overlap_collect(kernel, context) == []
+
+    output = context.drain()
+
+    assert [(event["name"], event["ts"]) for event in output] == [
+        ("Memory operations", 100.0),
+        ("Memcpy (HtoD)", 100.0),
+        ("kernel_1", 110.0),
+    ]
 
 
-def test_memory_context_drain_creates_superevents():
+def test_memory_context_releases_finished_group_before_later_kernel():
     context = MemoryOverlapContext()
 
-    context.add_memory_event(
-        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1)
+    memory = _event(
+        "Memcpy (HtoD)",
+        "gpu_memcpy",
+        100.0,
+        20.0,
+        1,
     )
-    context.add_memory_event(
-        _event("Memset (Device)", "gpu_memset", 110.0, 20.0, 1)
+    kernel = _event(
+        "kernel_1",
+        "kernel",
+        150.0,
+        10.0,
+        1,
     )
 
-    events = context.drain()
+    assert memory_overlap_collect(memory, context) == []
 
-    assert not context.collection_phase()
-    assert len(events) == 1
-    assert events[0]["name"] == "Memory operations"
-    assert events[0]["ts"] == 100.0
-    assert events[0]["dur"] == 30.0
+    output = memory_overlap_collect(kernel, context)
+
+    assert [(event["name"], event["ts"]) for event in output] == [
+        ("Memory operations", 100.0),
+        ("Memcpy (HtoD)", 100.0),
+        ("kernel_1", 150.0),
+    ]
+
+
+def test_memory_context_preserves_overlap_verifier_ordering():
+    memory_context = MemoryOverlapContext()
+    overlap_context = OverlapVerificationContext(strict=True)
+
+    events = [
+        _event(
+            "Memcpy (HtoD)",
+            "gpu_memcpy",
+            100.0,
+            20.0,
+            1,
+        ),
+        _event(
+            "kernel_1",
+            "kernel",
+            150.0,
+            10.0,
+            1,
+        ),
+    ]
+
+    for event in events:
+        for emitted in memory_overlap_collect(
+            event,
+            memory_context,
+        ):
+            verify_kernel_overlap(emitted, overlap_context)
+
+    for emitted in memory_context.drain():
+        verify_kernel_overlap(emitted, overlap_context)
+
+    assert overlap_context.warnings["overlaps"].args_list["count"] == 0
+
+
+def test_memory_context_drain_flushes_unfinished_group():
+    context = MemoryOverlapContext()
+
+    memory = _event(
+        "Memcpy (HtoD)",
+        "gpu_memcpy",
+        100.0,
+        20.0,
+        1,
+    )
+
+    assert memory_overlap_collect(memory, context) == []
+
+    output = context.drain()
+
+    assert [(event["name"], event["ts"]) for event in output] == [
+        ("Memory operations", 100.0),
+        ("Memcpy (HtoD)", 100.0),
+    ]
+
+    assert context.queues == {}
+    assert context.hold == []
+
+
+def test_memory_context_releases_only_safe_events_with_multiple_streams():
+    context = MemoryOverlapContext()
+
+    stream_1_memory = _event(
+        "Memcpy stream 1",
+        "gpu_memcpy",
+        100.0,
+        20.0,
+        1,
+    )
+    stream_2_memory = _event(
+        "Memcpy stream 2",
+        "gpu_memcpy",
+        110.0,
+        90.0,
+        2,
+    )
+    kernel = _event(
+        "kernel_1",
+        "kernel",
+        150.0,
+        10.0,
+        1,
+    )
+
+    assert memory_overlap_collect(stream_1_memory, context) == []
+    assert memory_overlap_collect(stream_2_memory, context) == []
+
+    output = memory_overlap_collect(kernel, context)
+
+    assert [(event["name"], event["ts"]) for event in output] == [
+        ("Memory operations", 100.0),
+        ("Memcpy stream 1", 100.0),
+    ]
+
+    remaining = context.drain()
+
+    assert [(event["name"], event["ts"]) for event in remaining] == [
+        ("Memory operations", 110.0),
+        ("Memcpy stream 2", 110.0),
+        ("kernel_1", 150.0),
+    ]
+
+
+def test_same_stream_memory_overlap_is_detected():
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1),
+        _event("Memcpy (DtoH)", "gpu_memcpy", 110.0, 20.0, 1),
+    ]
+
+    assert _run(events) == 1
+
+
+def test_cross_stream_memory_overlap_is_allowed():
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1),
+        _event("Memcpy (DtoH)", "gpu_memcpy", 110.0, 20.0, 2),
+    ]
+
+    assert _run(events) == 0
+
+
+def test_back_to_back_same_stream_memory_is_allowed():
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 20.0, 1),
+        _event("Memcpy (DtoH)", "gpu_memcpy", 120.0, 20.0, 1),
+    ]
+
+    assert _run(events) == 0
+
+
+def test_nested_same_stream_memory_overlap_is_detected():
+    events = [
+        _event("Memcpy (HtoD)", "gpu_memcpy", 100.0, 40.0, 1),
+        _event("Memcpy (DtoH)", "gpu_memcpy", 110.0, 10.0, 1),
+    ]
+
+    assert _run(events) == 1
+
+
+def test_missing_stream_memory_overlap_uses_default_stream():
+    first = _event(
+        "Memcpy (HtoD)",
+        "gpu_memcpy",
+        100.0,
+        20.0,
+        1,
+    )
+    second = _event(
+        "Memcpy (DtoH)",
+        "gpu_memcpy",
+        110.0,
+        20.0,
+        1,
+    )
+
+    first["args"].pop("stream")
+    second["args"].pop("stream")
+
+    assert _run([first, second]) == 1
+
+
+def test_memory_superevent_is_consumed_after_overlap_check():
+    context = OverlapVerificationContext(strict=True)
+
+    event = _event(
+        "Memory operations",
+        "gpu_memory",
+        100.0,
+        20.0,
+        1,
+    )
+    event["args"]["_memory_superevent"] = True
+
+    assert verify_kernel_overlap(event, context) == []
