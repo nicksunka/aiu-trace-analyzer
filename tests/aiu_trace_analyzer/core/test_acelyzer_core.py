@@ -230,3 +230,30 @@ def test_verification_pipeline_registers_sanity_check_first(default_acelyzer):
 
     assert processor.stages[0][0].__name__ == "sanity_check"
     assert type(processor.stages[0][1]).__name__ == "VerificationSanityCheckContext"
+
+
+def test_disable_input_warnings_defaults_to_false():
+    ace = Acelyzer(["-i", _BASE_INPUT])
+    assert ace.args.disable_input_warnings is False
+
+
+def test_disable_input_warnings_silences_regular_sanity_findings(default_acelyzer):
+    from aiu_trace_analyzer.core.processing import EventProcessor
+    from aiu_trace_analyzer.core.stage_profile import StageProfile
+
+    default_acelyzer.args.disable_input_warnings = True
+    profile = StageProfile.from_json(default_acelyzer.args.profile)
+    processor = EventProcessor(profile=profile)
+
+    default_acelyzer.register_processing_functions(
+        processor,
+        default_acelyzer.args,
+        None,
+    )
+
+    context = processor.stages[0][1]
+    assert context.silenced_findings == {
+        "negative_duration",
+        "zero_duration",
+        "zero_with_hw_time",
+    }

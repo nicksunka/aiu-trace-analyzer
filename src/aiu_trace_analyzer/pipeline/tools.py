@@ -7,9 +7,13 @@ import aiu_trace_analyzer.dialect as dialect
 from aiu_trace_analyzer.dialect import InputDialect
 
 
+def event_args_key(event: TraceEvent) -> str:
+    return "attr" if "attr" in event else "args"
+
+
 def event_location(event: TraceEvent) -> dict:
     """Return common location details for a trace finding instance."""
-    the_args = "attr" if "attr" in event else "args"
+    the_args = event_args_key(event)
     args = event.get(the_args, {})
 
     location = {

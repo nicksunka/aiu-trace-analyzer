@@ -409,7 +409,7 @@ class Acelyzer:
                             default=self.defaults["flex_ts_fix"],
                             help="Enable an experimental per-job time-stamp adjustment.")
 
-        parser.add_argument("--disable_input_warnings", action="store_true", default=True,
+        parser.add_argument("--disable_input_warnings", action="store_true", default=False,
                             help="Disable warnings encountered while ingesting data.")
 
         parser.add_argument("--comm_summarize_seq", action="store_true",
@@ -515,9 +515,18 @@ class Acelyzer:
                                       args,
                                       exporter: output.AbstractTraceExporter):
 
+        silenced_findings = set()
+        if args.disable_input_warnings:
+            silenced_findings = {
+                "negative_duration",
+                "zero_duration",
+                "zero_with_hw_time",
+            }
+
         process.register_stage(
             callback=event_pipe.sanity_check,
-            context=event_pipe.PipelineSanityCheckContext())
+            context=event_pipe.PipelineSanityCheckContext(
+                silenced_findings=silenced_findings))
 
         ##############################################################
         # Event preparation, cleanup, and sanitization
