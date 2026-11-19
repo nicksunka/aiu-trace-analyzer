@@ -182,7 +182,7 @@ class AbstractTraceIngest:
         dialect = GlobalIngestData.get_dialect(self.jobhash)
         if isinstance(dialect, InputDialectTORCH):
             # torch profiles all use dev/rank 0 and need to update for actual rank
-            if event["pid"] == 0:
+            if event.get("pid") == 0:
                 event["pid"] = self.rank_pid
             event, finished = self._adjust_torch_meta(event)
             if finished:
@@ -244,6 +244,8 @@ class AbstractTraceIngest:
         the_args = self._detect_args_type(event)
         if self.verification_mode:
             if the_args in event:
+                if event.get("ph") in ["X", "B", "E", "M", "b", "e", "i"]:
+                    event = self._rank_device_annotation(event, the_args)
                 event = self._add_job_hash(event, the_args)
             return event
 

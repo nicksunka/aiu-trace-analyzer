@@ -199,3 +199,64 @@ def test_summary_warnings(warning_class, expected_text, count, ingester_class, j
         output = capsys.readouterr()
         assert "WARNING" in output.out
         assert expected_text in output.out
+
+
+def test_verification_mode_adds_rank_without_scaling(json_input):
+    ingest = JsonFileEventTraceIngest(
+        json_input,
+        scale=2.0,
+        verification_mode=True,
+    )
+    ingest.set_rank_pid(3)
+
+    event = {
+        "name": "kernel",
+        "cat": "kernel",
+        "ph": "X",
+        "pid": 0,
+        "tid": 1,
+        "ts": 10.0,
+        "dur": 2.0,
+        "args": {},
+    }
+
+    result = ingest.updated_event(event)
+
+    assert result["pid"] == 3
+    assert result["args"]["rank"] == 3
+    assert result["ts"] == 10.0
+    assert result["dur"] == 2.0
+
+
+def test_verification_mode_non_rank_event_without_pid_does_not_raise(json_input):
+    ingest = JsonFileEventTraceIngest(
+        json_input,
+        verification_mode=True,
+    )
+    ingest.set_rank_pid(3)
+
+    event = {
+        "name": "counter",
+        "ph": "C",
+        "args": {},
+    }
+
+    assert ingest.updated_event(event) == event
+
+
+def test_verification_mode_metadata_without_pid_does_not_raise(json_input):
+    ingest = JsonFileEventTraceIngest(
+        json_input,
+        verification_mode=True,
+    )
+    ingest.set_rank_pid(3)
+
+    event = {
+        "name": "metadata",
+        "ph": "M",
+        "args": {},
+    }
+
+    result = ingest.updated_event(event)
+
+    assert result["args"]["rank"] == 3
