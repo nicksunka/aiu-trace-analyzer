@@ -57,7 +57,7 @@ class OverlapVerificationContext(OverlapDetectionContext, AbstractVerificationCo
             "OVL: cannot determine the dialect of the first event." \
             " Register this stage before any stage that removes the jobhash."
         if dialect.get("NAME") == "TORCH":
-            return ["pid", self._STREAM_ARG]
+            return ["args.rank", "pid", self._STREAM_ARG]
         return ["pid"]
 
     def _record_overlap(self, oevent: TraceEvent) -> None:

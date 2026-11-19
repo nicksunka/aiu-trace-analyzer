@@ -56,3 +56,5 @@ def test_kernel_containment_uses_parent_from_same_rank():
 
     assert finding["count"] == 1
     assert finding["instances"][0]["rank"] == 1
+    assert finding["instances"][0]["correlation"] == 42
+    assert "corr_id" not in finding["instances"][0]

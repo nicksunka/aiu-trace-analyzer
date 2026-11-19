@@ -150,3 +150,12 @@ def test_overlap_instance_contains_rank_and_source():
 
     assert instance["rank"] == 2
     assert instance["source"] == "overlap_verify.json"
+
+
+def test_same_pid_stream_overlap_across_ranks_is_allowed():
+    rank0 = _event("kernel_1", "kernel", 0.0, 10.0, stream=1, rank=0)
+    rank1 = _event("kernel_2", "kernel", 5.0, 10.0, stream=1, rank=1)
+
+    rank1["pid"] = rank0["pid"]
+
+    assert _detect([rank0, rank1]) == 0

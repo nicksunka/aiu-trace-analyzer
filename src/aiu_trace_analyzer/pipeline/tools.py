@@ -22,6 +22,9 @@ def event_location(event: TraceEvent) -> dict:
         "dur": event.get("dur"),
     }
 
+    if "correlation" in args:
+        location["correlation"] = args["correlation"]
+
     if "jobhash" in args:
         location["source"] = GlobalIngestData.get_job(args["jobhash"])
 
